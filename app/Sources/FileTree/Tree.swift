@@ -63,6 +63,7 @@ final class Node {
     var at: CGFloat = 0, slot: CGFloat = 0, side: CGFloat = 1
     var lx: CGFloat = 0, ly: CGFloat = 0
     var path: [(CGFloat, CGFloat)] = [] // the branch's centre line, one point every `step` along it
+    var traced: [CGFloat] = [] // what the path was traced from, so it's only redone when that changes
 
     init(url: URL, parent: Node?, isDir: Bool) {
         self.url = url
@@ -166,14 +167,14 @@ final class TreeModel {
         let text = rgb(style.light ? 0x8c8780 : 0x98938b)
         // open folders are drawn in layers: back panel, then the branch growing out of it, then the front flap
         for n in shown where n.isDir && n.grow > 0 { folderBack(&gc, screen(n.ix, n.iy), ink, style.fontSize, tab: false) }
-        var paths: [UInt32: Path] = [:]
-        for y in 0..<gh {
-            for x in 0..<gw where grid[y * gw + x] != 0 {
-                paths[grid[y * gw + x], default: Path()].addRect(
-                    CGRect(x: CGFloat(x) * style.pixel, y: CGFloat(y) * style.pixel, width: style.pixel, height: style.pixel))
-            }
-        }
-        for (c, p) in paths { gc.fill(p, with: .color(rgb(c))) }
+        // the pixels go out as one bitmap, scaled up without smoothing
+        let data = grid.withUnsafeBytes { Data($0) } as CFData
+        let bitmap = CGImage(width: gw, height: gh, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: gw * 4,
+                             space: CGColorSpaceCreateDeviceRGB(),
+                             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                             provider: CGDataProvider(data: data)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        gc.draw(Image(decorative: bitmap, scale: 1).interpolation(.none),
+                in: CGRect(x: 0, y: 0, width: CGFloat(gw) * style.pixel, height: CGFloat(gh) * style.pixel))
 
         hits = []
         for n in shown {
@@ -186,6 +187,7 @@ final class TreeModel {
                 .font(.system(size: style.fontSize, weight: .medium)).foregroundColor(isSel || isHover ? ink : text))
             let tsz = label.measure(in: CGSize(width: 4000, height: 400))
             let ip = screen(n.ix, n.iy), lp = screen(n.lx, n.ly)
+            if lp.x > size.width + 40 || lp.x < -800 || lp.y < -40 || lp.y > size.height + 40 { continue }
             let textRect = CGRect(x: lp.x - 5, y: lp.y - tsz.height / 2 - 2, width: tsz.width + 10, height: tsz.height + 4)
             let iconRect = CGRect(x: ip.x - style.fontSize * 0.9, y: ip.y - style.fontSize * 0.8, width: style.fontSize * 1.8, height: style.fontSize * 1.6)
             // the text gets a clear patch so branches never run through it. like the video there's no
@@ -294,6 +296,9 @@ final class TreeModel {
     // tip, never past it, so it levels off without crossing back. the trunk instead
     // keeps a gentle s-wave with a bounded height, like the video
     private func trace(_ n: Node, start: CGFloat) {
+        let key = [n.ox, n.oy, n.ang, n.lean, n.len, start]
+        if key == n.traced { return }
+        n.traced = key
         let step: CGFloat = 0.25, phase = CGFloat(n.seed % 100)
         var x = n.ox, y = n.oy, s: CGFloat = 0
         n.path.removeAll(keepingCapacity: true)
@@ -332,15 +337,19 @@ final class TreeModel {
         let waiting = !n.open && n.kids.contains { $0.age > 0 }
         n.age = n.open ? min(ripe, n.age + dt * style.speed) : waiting ? n.age : max(0, n.age - dt * style.speed * 7)
         if n.age != before { moving = true }
-        var s: CGFloat = 10
-        for k in n.kids {
+        // items alternate sides. each gets room for its label, and an open folder also keeps everything
+        // it has grown clear of later items, but only those on its own side of the branch
+        var s: CGFloat = 10, above: CGFloat = 0, below: CGFloat = 0
+        for (i, k) in n.kids.enumerated() {
             _ = measure(k, dt)
-            // room for the label, plus everything an open folder has grown, so later siblings move past it
-            // items alternate sides, so neighbours only need about half a label of room each
+            // the trunk starts with an item above it, every other branch with one below, like the video
+            k.side = (i % 2 == 0) == (n === root) ? -1 : 1
             k.slot = 12 + CGFloat(k.name.count + 4) * charPx * 0.9
-            s += k.slot + k.span
+            k.at = max(s, k.side < 0 ? above : below) + k.slot / 2
+            s = k.at + k.slot / 2
+            if k.side < 0 { above = s + k.span } else { below = s + k.span }
         }
-        n.len = s + 6
+        n.len = max(s, above, below) + 6
         n.grow = min(1, n.age / tipTime)
         return n.len * n.grow
     }
@@ -349,12 +358,7 @@ final class TreeModel {
     // keep their whole subtree on their own side of the parent and own a stretch of it, so
     // branches never run into each other
     private func place(_ n: Node) {
-        var s: CGFloat = 10
         for (i, k) in n.kids.enumerated() {
-            k.at = s + k.slot / 2
-            // the trunk starts with an item above it, every other branch with one below, like the video
-            k.side = (i % 2 == 0) == (n === root) ? -1 : 1
-            s += k.slot + k.span
             (k.ox, k.oy) = point(n, k.at)
             let (jx, jy) = (k.ox, k.oy)
             // every branch turns the same fixed amount away from its parent's direction at the junction,
@@ -423,7 +427,7 @@ final class TreeModel {
     }
 
     private func put(_ x: Int, _ y: Int, _ c: UInt32) {
-        if x >= 0 && x < gw && y >= 0 && y < gh { grid[y * gw + x] = c }
+        if x >= 0 && x < gw && y >= 0 && y < gh { grid[y * gw + x] = 0xff000000 | c }
     }
 
     // hand drawn folder outline: a rounded body, plus the tab on top when it's closed.
@@ -463,6 +467,9 @@ final class TreeModel {
 
     private func draw(_ n: Node) {
         let scale = unit / style.pixel, vlen = n.len * n.grow, ripe = max(0, n.age - ripenDelay) / ripenTime * (n.len + 12)
+        // only paint what lands on screen, plus a margin for the widest clump
+        let m = CGFloat(40), w = CGFloat(gw), h = CGFloat(gh)
+        func onScreen(_ x: CGFloat, _ y: CGFloat) -> Bool { x > -m && x < w + m && y > -m && y < h + m }
 
         // bark: a shaded tube, light along the top and dark along the bottom edge,
         // thinning into a dotted hairline at the growing tip
@@ -471,6 +478,10 @@ final class TreeModel {
             let p = point(n, s), q = point(n, s + 0.25)
             let tl = hypot(q.0 - p.0, q.1 - p.1), tx = (q.0 - p.0) / tl, ty = (q.1 - p.1) / tl
             let (rx, ry) = raster(p.0, p.1)
+            if !onScreen(rx, ry) {
+                s += 0.4 / scale
+                continue
+            }
             let young = min(1, max(0, (ripe - s) / 12)), thick = young * young * (3 - 2 * young)
             let r = max(0.5, n.width * scale * 0.5 * (1 - 0.35 * s / n.len) * (0.22 + 0.78 * thick) * min(1, max(0.25, (n.len - s) / 8)))
             let ir = Int(ceil(r))
@@ -506,6 +517,7 @@ final class TreeModel {
             let p = point(n, sc), q = point(n, sc + 0.25)
             let tl = hypot(q.0 - p.0, q.1 - p.1), tx = (q.0 - p.0) / tl, ty = (q.1 - p.1) / tl
             let (rx, ry) = raster(p.0, p.1)
+            if !onScreen(rx, ry) { continue }
             let r = n.width * scale * 0.5 * (1 - 0.35 * sc / n.len)
             let lift = h % 4 == 0 ? r * 0.8 : -r * 1.1
             let cx = rx - ty * lift + CGFloat(Int((h >> 16) % 5) - 2), cy = ry + tx * lift
@@ -538,6 +550,7 @@ final class TreeModel {
             let a = atan2(q.1 - p.1, q.0 - p.0) + (h & 1 == 0 ? 1 : -1) * (0.45 + CGFloat((h >> 4) % 60) / 100)
             let tl = (2 + CGFloat((h >> 10) % 40) / 10) * (1 - 0.5 * st / n.len) * min(1, (vlen - st) / 5) * scale
             let (rx, ry) = raster(p.0, p.1)
+            if !onScreen(rx, ry) { continue }
             let fork = (rx + cos(a) * tl * 0.55, ry + sin(a) * tl * 0.55, a + (h & 2 == 0 ? 0.55 : -0.55), tl * 0.45)
             for (sx, sy, sa, sl) in [(rx, ry, a, tl), fork] where sl > 1 {
                 var t: CGFloat = 1
@@ -570,7 +583,9 @@ final class TreeModel {
         for (i, k) in n.kids.enumerated() where k.at <= vlen {
             shown.append(k)
             if k.isDir {
-                if k.grow > 0 { draw(k) }
+                // skip a whole subtree when everything it grew last frame is off screen
+                let (x0, y0) = raster(k.box.0, k.box.2), (x1, y1) = raster(k.box.1, k.box.3)
+                if k.grow > 0 && x1 > -m && x0 < w + m && y1 > -m && y0 < h + m { draw(k) }
                 continue
             }
             // a dotted twig reaching out to the file, stopping short of its icon

@@ -36,7 +36,14 @@ struct ContentView: View {
     var body: some View {
         TimelineView(.animation(paused: !awake)) { timeline in
             Canvas { gc, size in
-                guard let model else { return }
+                // a window macos restores on launch can draw without ever running .task, so make the model here too
+                guard let model else {
+                    DispatchQueue.main.async {
+                        if self.model == nil { self.model = TreeModel(url: URL(fileURLWithPath: folder), showHidden: showHidden) }
+                        awake = true
+                    }
+                    return
+                }
                 if model.frame(&gc, size: size, now: timeline.date, style: style) {
                     DispatchQueue.main.async { awake = false }
                 }
