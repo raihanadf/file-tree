@@ -13,7 +13,8 @@ struct FileTreeApp: App {
 }
 
 struct ContentView: View {
-    @AppStorage("folder") private var folder = FileManager.default.homeDirectoryForCurrentUser.path
+    // every launch starts at home, picking another folder only lasts for the session
+    @State private var folder = FileManager.default.homeDirectoryForCurrentUser.path
     @AppStorage("pixelSize") private var pixel = 3.0
     @AppStorage("trunkSize") private var thickness = 14.0
     @AppStorage("moss") private var moss = 1.0
